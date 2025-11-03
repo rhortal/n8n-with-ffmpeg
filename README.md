@@ -1,6 +1,6 @@
 # n8n + ffmpeg (derived image)
 
-This repository builds a tiny derived n8n image that adds ffmpeg, publishes it to GitHub Container Registry (GHCR), and automatically rebuilds only when the upstream n8n base image changes. The workflow also attempts to set the package visibility to public after a successful push.
+This repository builds a tiny derived n8n image that adds ffmpeg, publishes it to GitHub Container Registry (GHCR), and automatically rebuilds only when the upstream n8n base image changes.
 
 Use this repo if you need ffmpeg available inside n8n and want a reproducible, automated, minimal image you control.
 
@@ -12,9 +12,9 @@ Contents
   - marks the GHCR package public after push
 - base-image-digest.txt — digest tracked by the workflow (created/updated by the workflow)
 
-Quick links (replace OWNER/REPO)
-- Image location (GHCR): ghcr.io/OWNER/REPO:latest
-- Repo packages page: https://github.com/OWNER/REPO/packages
+Quick links 
+- Image location (GHCR): docker pull ghcr.io/rhortal/n8n-with-ffmpeg:latest
+- Repo packages page: https://github.com/rhortal/n8n-with-ffmpeg/packages
 
 Prerequisites
 - GitHub repo with this code pushed to main
@@ -32,7 +32,7 @@ https://github.com/OWNER/REPO/packages
 Files (important ones)
 - Dockerfile
   ```Dockerfile
-  FROM n8nio/n8n:latest-alpine
+  FROM n8nio/n8n:latest
 
   USER root
   RUN apk add --no-cache ffmpeg
@@ -47,11 +47,7 @@ Files (important ones)
 How to use the image (examples)
 
 - Pull public image:
-  docker pull ghcr.io/OWNER/REPO:latest
-
-- If private, log in first (use PAT with read:packages):
-  echo "YOUR_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-  docker pull ghcr.io/OWNER/REPO:latest
+  docker pull ghcr.io/rhortal/n8n-with-ffmpeg:latest # Or use your own
 
 - docker-compose (example)
   ```yaml
@@ -71,62 +67,10 @@ How to use the image (examples)
     n8n-data:
   ```
 
-Using Watchtower to auto-update (private image)
-- If watchtower is a container and images are private, it needs Docker credentials.
-- You can mount your host ~/.docker into the watchtower container and set DOCKER_CONFIG.
-
-Example docker-compose for watchtower:
-```yaml
-services:
-  watchtower:
-    image: containrrr/watchtower:latest
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /home/youruser/.docker:/config:ro
-    environment:
-      - DOCKER_CONFIG=/config
-```
-Replace /home/youruser with the home of the user that ran `docker login ghcr.io`.
-
-Making GHCR images public (automatic step)
-- The workflow attempts to set the package visibility to public after push. That step requires:
-  - permissions: packages: write (configured in the workflow)
-  - the package to exist and to be owned by the repository owner
-- If visibility change fails with 404:
-  - Confirm the image was pushed and which account owns it (inspect Actions logs).
-  - Ensure the login used during push is the repository owner: the workflow should login using username `${{ github.repository_owner }}` and password `${{ secrets.GITHUB_TOKEN }}`.
-  - If images were pushed by a different account previously, you may need to delete those packages and re-run the workflow with corrected login so ownership is correct.
-
-Manually making a package public (UI)
-1. Go to: https://github.com/OWNER/REPO/packages
-2. Click the package, then Package settings → Change visibility → Public
-
-Scriptable method (gh CLI)
-- For a user package:
-  gh api -X PATCH /user/packages/container/PACKAGE_NAME/visibility -f visibility=public
-- For an org package:
-  gh api -X PATCH /orgs/ORG/packages/container/PACKAGE_NAME/visibility -f visibility=public
-
-Host authentication (for private image pulls)
-1. Create a PAT on GitHub with scope read:packages (and write:packages if needed).
-2. On the host:
-   echo "YOUR_PAT" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-3. Confirm:
-   docker pull ghcr.io/OWNER/REPO:latest
-
 Important notes and troubleshooting
 
 - First push must succeed
   The package is created on the first push. The visibility-step will 404 until the package exists.
-
-- Ownership matters
-  If you log into GHCR during push with a different account than the repository owner, the package may be created under that account. That prevents the repo workflow from changing visibility. Ensure the workflow logs in with:
-  username: ${{ github.repository_owner }}
-  password: ${{ secrets.GITHUB_TOKEN }}
-
-- If visibility step fails but push succeeded
-  Consider making the visibility change a best-effort (non-fatal)—see the workflow to optionally change the behavior.
 
 - If digest detection fails or you want more robust detection
   The workflow uses docker inspect fallbacks. For absolute reliability you can:
@@ -169,8 +113,6 @@ Debugging tips
   - Use the GitHub web UI Packages page → select package → Delete (requires appropriate permissions).
 
 Security notes
-- Do not store PATs or other secrets in plain text in the repo.
-- For host access, prefer a machine/service user with minimal scopes (read:packages).
 - Use repo secrets for automation and the built-in GITHUB_TOKEN for workflow pushes.
 
 FAQs
