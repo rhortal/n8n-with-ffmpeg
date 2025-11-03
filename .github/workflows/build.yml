@@ -1,0 +1,121 @@
+name: Rebuild derived n8n image (only when base changes)
+
+on:
+  push:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 3 * * *'   # daily at 03:00 UTC (adjust if you like)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.decide.outputs.changed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # ensure the action can push commits
+          persist-credentials: true
+
+      - name: Pull base image and get digest
+        id: get-digest
+        run: |
+          # Pull the base image (public image)
+          docker pull n8nio/n8n:latest
+
+          # Get the repo digest (form: n8nio/n8n@sha256:...)
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' n8nio/n8n:latest || true)
+
+          # Export as step output (empty if not found)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to build (compare digest & commit update)
+        id: decide
+        env:
+          NEW_DIGEST: ${{ steps.get-digest.outputs.digest }}
+        run: |
+          OLD=""
+          if [ -f base-image-digest.txt ]; then
+            OLD=$(cat base-image-digest.txt)
+          fi
+
+          echo "old digest: $OLD"
+          echo "new digest: $NEW_DIGEST"
+
+          # If this push was created by the workflow itself (commit contains [skip ci]), skip to avoid loop
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # head_commit.message could be empty for some triggers; guard it
+            MSG='${{ github.event.head_commit.message }}'
+            if echo "$MSG" | grep -q '\[skip ci\]'; then
+              echo "Detected [skip ci] in commit message. Skipping."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # If no new digest (pull failed?), treat as no-change to avoid accidental builds
+          if [ -z "$NEW_DIGEST" ]; then
+            echo "No digest obtained for base image; skipping build."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$OLD" = "$NEW_DIGEST" ]; then
+            echo "Base image digest unchanged. No build required."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Digest changed -> update file and commit
+          echo "$NEW_DIGEST" > base-image-digest.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add base-image-digest.txt
+          git commit -m "Update base-image-digest to $NEW_DIGEST [skip ci]" || true
+          git push origin HEAD:main || true
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: ${{ needs.check.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (optional for multi-arch)
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push derived image (n8n + ffmpeg)
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # Uncomment and set platforms if you want multi-arch builds:
+          # platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
