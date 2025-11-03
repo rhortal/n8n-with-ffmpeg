@@ -13,7 +13,7 @@ permissions:
 
 env:
   # Track the Alpine base image tag here (must match the FROM in Dockerfile)
-  BASE_IMAGE: n8nio/n8n:latest-alpine
+  BASE_IMAGE: n8nio/n8n:latest
 
 jobs:
   check:
