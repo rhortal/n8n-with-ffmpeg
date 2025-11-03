@@ -11,6 +11,10 @@ permissions:
   contents: write
   packages: write
 
+env:
+  # Track the Alpine base image tag here (must match the FROM in Dockerfile)
+  BASE_IMAGE: n8nio/n8n:latest-alpine
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -21,19 +25,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # ensure the action can push commits
           persist-credentials: true
 
       - name: Pull base image and get digest
         id: get-digest
         run: |
-          # Pull the base image (public image)
-          docker pull n8nio/n8n:latest
+          echo "Pulling base image: $BASE_IMAGE"
+          docker pull "$BASE_IMAGE"
 
-          # Get the repo digest (form: n8nio/n8n@sha256:...)
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' n8nio/n8n:latest || true)
+          # Try to get repo digest (format: n8nio/n8n@sha256:...)
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$BASE_IMAGE" || true)
 
-          # Export as step output (empty if not found)
+          # If RepoDigests is empty, try other inspect parsing
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(docker inspect "$BASE_IMAGE" --format '{{json .RepoDigests}}' | sed -n 's/^\["\([^"]*\)".*/\1/p' || true)
+          fi
+
+          # Fallback to image ID if still empty
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(docker inspect --format='{{.Id}}' "$BASE_IMAGE" || true)
+            DIGEST="image-id:${DIGEST}"
+          fi
+
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to build (compare digest & commit update)
@@ -49,9 +62,8 @@ jobs:
           echo "old digest: $OLD"
           echo "new digest: $NEW_DIGEST"
 
-          # If this push was created by the workflow itself (commit contains [skip ci]), skip to avoid loop
+          # Avoid loop when commit created by this workflow includes [skip ci]
           if [ "${{ github.event_name }}" = "push" ]; then
-            # head_commit.message could be empty for some triggers; guard it
             MSG='${{ github.event.head_commit.message }}'
             if echo "$MSG" | grep -q '\[skip ci\]'; then
               echo "Detected [skip ci] in commit message. Skipping."
@@ -60,7 +72,6 @@ jobs:
             fi
           fi
 
-          # If no new digest (pull failed?), treat as no-change to avoid accidental builds
           if [ -z "$NEW_DIGEST" ]; then
             echo "No digest obtained for base image; skipping build."
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -119,3 +130,58 @@ jobs:
           # platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Make package public on GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Identify owner and repo (package name)
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          PACKAGE_NAME="$REPO"
+
+          echo "Setting GHCR package visibility to public for package: $OWNER / $PACKAGE_NAME"
+
+          # Ensure jq is available for JSON parsing
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+          # Determine owner type (User vs Organization)
+          OWNER_TYPE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/$OWNER/$REPO" | jq -r '.owner.type // empty')
+
+          if [ -z "$OWNER_TYPE" ]; then
+            echo "Failed to determine repository owner type. Aborting visibility change."
+            exit 1
+          fi
+
+          echo "Owner type: $OWNER_TYPE"
+
+          if [ "$OWNER_TYPE" = "Organization" ]; then
+            API_URL="https://api.github.com/orgs/$OWNER/packages/container/$PACKAGE_NAME/visibility"
+          else
+            API_URL="https://api.github.com/user/packages/container/$PACKAGE_NAME/visibility"
+          fi
+
+          echo "Calling API: $API_URL"
+
+          # Make the package public
+          TMP_OUT=$(mktemp)
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o "$TMP_OUT" -X PATCH \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$API_URL" -d '{"visibility":"public"}')
+
+          cat "$TMP_OUT" || true
+          rm -f "$TMP_OUT"
+
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            echo "Package visibility set to public."
+          else
+            echo "Failed to set package visibility. HTTP status: $HTTP_STATUS"
+            echo "Note: the package must exist (first push), and the token must have permission (packages: write)."
+            exit 1
+          fi
