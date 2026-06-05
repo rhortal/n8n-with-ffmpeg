@@ -1,1 +1,1 @@
-force-rebuild
+n8nio/n8n@sha256:1872cce3548bf4dcfe5aceaf3d9293f4499635823fbdea0ee726bd222d2e44b8
